@@ -123,25 +123,10 @@ function GetLootThreshold()
 end
 
 -- ============================================================================
--- List Lookup, Coin Detection & BoP Tooltip Scanner Helpers
+-- List Lookup & BoP Tooltip Scanner Helpers
 -- ============================================================================
 local scanTooltip = CreateFrame("GameTooltip", "LootWizScanTooltip", nil, "GameTooltipTemplate")
 local BOP_TEXT = ITEM_BIND_ON_PICKUP or "Binds when picked up"
-
-local function IsCoinSlot(slot)
-    if not slot then return false end
-    if LootSlotIsCoin and LootSlotIsCoin(slot) then
-        return true
-    end
-    if GetLootSlotType and GetLootSlotType(slot) == 2 then
-        return true
-    end
-    local texture = GetLootSlotInfo(slot)
-    if texture and texture:find("INV_Misc_Coin", 1, true) then
-        return true
-    end
-    return false
-end
 
 local function IsLootSlotBoP(slot)
     if not slot then return false end
@@ -256,33 +241,17 @@ local function HasAnyLootRemaining()
     local num = GetNumLootItems()
     if not num or num <= 0 then return false end
     for slot = 1, num do
-        if IsCoinSlot(slot) or LootSlotIsItem(slot) then
-            local texture = GetLootSlotInfo(slot)
-            if texture then
-                return true
-            end
+        local texture = GetLootSlotInfo(slot)
+        if texture then
+            return true
         end
     end
     return false
 end
 
-local function LootCoinsImmediately()
-    local numItems = GetNumLootItems()
-    if not numItems or numItems <= 0 then return end
-    for slot = 1, numItems do
-        if IsCoinSlot(slot) then
-            LootSlot(slot)
-        end
-    end
-end
-
 local function EvaluateSlotAction(slot)
-    if IsCoinSlot(slot) then
-        return "AUTO_LOOT_COIN"
-    end
-
     if not LootSlotIsItem(slot) then
-        return "AUTO_LOOT_ITEM"
+        return "SKIP"
     end
 
     local texture, itemName, quantity, quality, locked = GetLootSlotInfo(slot)
@@ -326,30 +295,23 @@ local function ProcessCurrentLootWindow()
 
     local numItems = GetNumLootItems()
     if not numItems or numItems <= 0 then
-        CloseLoot()
         return
     end
 
     local queue = {}
     local manualCount = 0
 
-    -- Build slot queue from bottom to top so slot removal never shifts unprocessed indices,
-    -- but place any remaining coin slot at the very front of the queue so it runs before ML state.
+    -- Build slot queue from bottom to top so slot removal never shifts unprocessed indices
     for slot = numItems, 1, -1 do
         local action = EvaluateSlotAction(slot)
-        if action == "AUTO_LOOT_COIN" then
-            table.insert(queue, 1, { slot = slot, action = action, retries = 0 })
-        elseif action == "AUTO_LOOT_ITEM" then
-            table.insert(queue, { slot = slot, action = action, retries = 0 })
+        if action == "AUTO_LOOT_ITEM" then
+            table.insert(queue, { slot = slot, retries = 0 })
         elseif action == "KEEP_MANUAL" then
             manualCount = manualCount + 1
         end
     end
 
     if #queue == 0 then
-        if manualCount == 0 and not HasAnyLootRemaining() then
-            CloseLoot()
-        end
         return
     end
 
@@ -372,38 +334,32 @@ local function ProcessCurrentLootWindow()
         local texture = GetLootSlotInfo(slot)
 
         -- Slot already cleared
-        if not texture and not IsCoinSlot(slot) then
+        if not texture then
             idx = idx + 1
             return
         end
 
-        if entry.action == "AUTO_LOOT_COIN" then
-            LootSlot(slot)
+        autoConfirmSlots[slot] = true
+        masterLootPromptFired = false
+
+        -- Prime the slot via LootSlot while suppressing the Master Loot dropdown UI.
+        isSuppressingMLPrompt = true
+        LootSlot(slot)
+        isSuppressingMLPrompt = false
+        HideMasterLootMenus()
+
+        local mlIndex = GetPlayerMLCandidateIndex(slot)
+        if mlIndex then
+            GiveMasterLoot(slot, mlIndex)
             idx = idx + 1
-
-        elseif entry.action == "AUTO_LOOT_ITEM" then
-            autoConfirmSlots[slot] = true
-            masterLootPromptFired = false
-
-            -- Prime the slot via LootSlot while suppressing the Master Loot dropdown UI.
-            isSuppressingMLPrompt = true
-            LootSlot(slot)
-            isSuppressingMLPrompt = false
-            HideMasterLootMenus()
-
-            local mlIndex = GetPlayerMLCandidateIndex(slot)
-            if mlIndex then
-                GiveMasterLoot(slot, mlIndex)
+        elseif not masterLootPromptFired then
+            -- Slot did not trigger OPEN_MASTER_LOOT_LIST, so LootSlot(slot) handled it directly
+            idx = idx + 1
+        else
+            -- Slot is ML-controlled, waiting for server's SMSG_LOOT_MASTER_LIST packet
+            entry.retries = entry.retries + 1
+            if entry.retries >= 8 then
                 idx = idx + 1
-            elseif not masterLootPromptFired then
-                -- Slot did not trigger OPEN_MASTER_LOOT_LIST, so LootSlot(slot) handled it directly
-                idx = idx + 1
-            else
-                -- Slot is ML-controlled, waiting for server's SMSG_LOOT_MASTER_LIST packet
-                entry.retries = entry.retries + 1
-                if entry.retries >= 8 then
-                    idx = idx + 1
-                end
             end
         end
     end)
@@ -477,8 +433,6 @@ eventFrame:SetScript("OnEvent", function(self, event, arg1)
     elseif event == "LOOT_OPENED" then
         isLootingSession = true
         if IsPlayerMasterLooter() then
-            -- Loot coins immediately on LOOT_OPENED before any Master Loot slot state is primed
-            LootCoinsImmediately()
             C_Timer.After(0.05, ProcessCurrentLootWindow)
         end
 

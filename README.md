@@ -10,7 +10,7 @@ It uses a paced, reverse-indexed loot queue that processes items cleanly and saf
 
 * **Zero-Setup Operation:** Enabled automatically whenever group loot is set to **Master Looter** and you are the Master Looter. No toggle commands required.
 * **Auto-Master Loot on Party Formation:** Automatically switches the loot method to **Master Looter** when you form a party as the leader.
-* **Rarity Threshold Automation:** Automatically loots coins and items **below** your chosen rarity threshold directly to your bags, while leaving items **at or above** your threshold in the loot window for manual handling.
+* **Rarity Threshold Automation:** Automatically loots items **below** your chosen rarity threshold directly to your bags, while leaving items **at or above** your threshold in the loot window for manual handling.
 * **BoP Exclusion Toggle:** Leave **Bind on Pickup (BoP)** items in the loot window when enabled, even if they fall below your threshold. The **Always Auto-Loot** list still overrides this behavior for any item you explicitly add.
 * **Native Player Frame Integration:** Configure your auto-loot threshold directly via the standard right-click menu on your Player Frame (**Loot Threshold -> Uncommon / Rare / Epic**) or through the in-game config panel.
 * **In-Game Configuration GUI (`/lw`):**
