@@ -5,6 +5,9 @@ local addonName, ns = ...
 -- ============================================================================
 LootWizDB = LootWizDB or {}
 LootWizDB.threshold = LootWizDB.threshold or 2 -- Default: 2 (Uncommon)
+if LootWizDB.ignoreBoP == nil then
+    LootWizDB.ignoreBoP = false
+end
 LootWizDB.ignoreList = LootWizDB.ignoreList or {}
 LootWizDB.alwaysLootList = LootWizDB.alwaysLootList or {}
 
@@ -120,8 +123,30 @@ function GetLootThreshold()
 end
 
 -- ============================================================================
--- List Lookup Helpers
+-- List Lookup & BoP Tooltip Scanner Helpers
 -- ============================================================================
+local scanTooltip = CreateFrame("GameTooltip", "LootWizScanTooltip", nil, "GameTooltipTemplate")
+local BOP_TEXT = ITEM_BIND_ON_PICKUP or "Binds when picked up"
+
+local function IsLootSlotBoP(slot)
+    if not slot then return false end
+    scanTooltip:SetOwner(WorldFrame, "ANCHOR_NONE")
+    scanTooltip:ClearLines()
+    scanTooltip:SetLootItem(slot)
+
+    local numLines = scanTooltip:NumLines() or 0
+    for i = 2, math.min(numLines, 6) do
+        local line = _G["LootWizScanTooltipTextLeft" .. i]
+        if line then
+            local text = line:GetText()
+            if text and (text == BOP_TEXT or text:find(BOP_TEXT, 1, true)) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
 local function ExtractItemID(link)
     if not link then return nil end
     local id = link:match("item:(%d+)")
@@ -248,9 +273,19 @@ local function EvaluateSlotAction(slot)
         return "KEEP_MANUAL"
     end
 
-    -- 2. Always Loot List or quality strictly below threshold -> auto-loot to player
+    -- 2. Always Auto-Loot List overrides threshold and BoP settings
+    if IsItemInList(LootWizDB.alwaysLootList, itemName, itemID) then
+        return "AUTO_LOOT_ITEM"
+    end
+
+    -- 3. If "Leave BoP items" is enabled, keep BoP items in the loot window
+    if LootWizDB.ignoreBoP and IsLootSlotBoP(slot) then
+        return "KEEP_MANUAL"
+    end
+
+    -- 4. Quality strictly below threshold -> auto-loot to player
     local itemQuality = tonumber(quality) or 0
-    if IsItemInList(LootWizDB.alwaysLootList, itemName, itemID) or itemQuality < (LootWizDB.threshold or 2) then
+    if itemQuality < (LootWizDB.threshold or 2) then
         return "AUTO_LOOT_ITEM"
     end
 
@@ -319,9 +354,6 @@ local function ProcessCurrentLootWindow()
             masterLootPromptFired = false
 
             -- Prime the slot via LootSlot while suppressing the Master Loot dropdown UI.
-            -- If the slot is a normal slot, LootSlot() loots it directly.
-            -- If the slot is a Master Loot slot (including Common items on TortoiseWoW),
-            -- LootSlot() selects the slot in the C++ engine so GetMasterLootCandidate() populates.
             isSuppressingMLPrompt = true
             LootSlot(slot)
             isSuppressingMLPrompt = false
@@ -482,7 +514,7 @@ local function CreateListPanel(parent, titleText, subtitleText, dbTableKey, xOff
     local panel = CreateFrame("Frame", nil, parent)
     panel:SetWidth(235)
     panel:SetHeight(290)
-    panel:SetPoint("TOPLEFT", parent, "TOPLEFT", xOffset, -108)
+    panel:SetPoint("TOPLEFT", parent, "TOPLEFT", xOffset, -134)
     panel:SetBackdrop({
         bgFile = "Interface\\ChatFrame\\ChatFrameBackground",
         edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
@@ -635,7 +667,7 @@ local function BuildGUI()
 
     local f = CreateFrame("Frame", "LootWizGUIFrame", UIParent)
     f:SetWidth(500)
-    f:SetHeight(425)
+    f:SetHeight(452)
     f:SetPoint("CENTER", 0, 40)
     f:SetFrameStrata("DIALOG")
     f:SetMovable(true)
@@ -684,6 +716,32 @@ local function BuildGUI()
             SetLootWizThreshold(qIndex, false)
         end)
         threshButtons[qIndex] = btn
+    end
+
+    -- BoP Exclusion Checkbox
+    local bopCheck = CreateFrame("CheckButton", "LootWizIgnoreBoPCheck", f, "UICheckButtonTemplate")
+    bopCheck:SetWidth(24)
+    bopCheck:SetHeight(24)
+    bopCheck:SetPoint("TOPLEFT", 14, -104)
+    bopCheck:SetChecked(LootWizDB.ignoreBoP and true or false)
+
+    local bopLabel = bopCheck:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    bopLabel:SetPoint("LEFT", bopCheck, "RIGHT", 4, 1)
+    bopLabel:SetText("Leave Bind on Pickup (BoP) items in loot window")
+
+    bopCheck:SetScript("OnClick", function(self)
+        LootWizDB.ignoreBoP = self:GetChecked() and true or false
+        if LootWizDB.ignoreBoP then
+            Print("Bind on Pickup (BoP) items will now be |cffff5555left in the loot window|r.")
+        else
+            Print("Bind on Pickup (BoP) items below threshold will now be |cff1eff00auto-looted|r.")
+        end
+    end)
+
+    function ns.UpdateGUIBoPCheckbox()
+        if bopCheck then
+            bopCheck:SetChecked(LootWizDB.ignoreBoP and true or false)
+        end
     end
 
     function ns.UpdateGUIThresholdButtons()
@@ -735,12 +793,14 @@ local function BuildGUI()
 
     f:SetScript("OnShow", function()
         ns.UpdateGUIThresholdButtons()
+        ns.UpdateGUIBoPCheckbox()
         ns.UpdateGUIStatus()
         f.alwaysPanel.RefreshList()
         f.ignorePanel.RefreshList()
     end)
 
     ns.UpdateGUIThresholdButtons()
+    ns.UpdateGUIBoPCheckbox()
     ns.UpdateGUIStatus()
 
     f:Hide()
@@ -778,6 +838,16 @@ SlashCmdList["LOOTWIZ"] = function(msg)
         SetLootWizThreshold(3, false)
     elseif cmd == "epic" then
         SetLootWizThreshold(4, false)
+    elseif cmd == "bop" then
+        LootWizDB.ignoreBoP = not LootWizDB.ignoreBoP
+        if ns.UpdateGUIBoPCheckbox then
+            ns.UpdateGUIBoPCheckbox()
+        end
+        if LootWizDB.ignoreBoP then
+            Print("Bind on Pickup (BoP) items will now be |cffff5555left in the loot window|r.")
+        else
+            Print("Bind on Pickup (BoP) items below threshold will now be |cff1eff00auto-looted|r.")
+        end
     else
         local f = BuildGUI()
         if f:IsShown() then
