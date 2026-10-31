@@ -20,24 +20,66 @@ local QUALITY_INFO = {
     [2] = { name = "Uncommon",  hex = "|cff1eff00", r = 0.12, g = 1.00, b = 0.00 },
     [3] = { name = "Rare",      hex = "|cff0070dd", r = 0.00, g = 0.44, b = 0.87 },
     [4] = { name = "Epic",      hex = "|cffa335ee", r = 0.64, g = 0.21, b = 0.93 },
-    [5] = { name = "Legendary", hex = "|cffff8000", r = 0.00, g = 0.50, b = 0.00 },
+    [5] = { name = "Legendary", hex = "|cffff8000", r = 1.00, g = 0.50, b = 0.00 },
 }
-QUALITY_INFO[5].r = 1.00
 
 local function Print(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cffffd100[LootWiz]|r " .. tostring(msg))
 end
 
+local function StripColorCodes(str)
+    if not str then return "" end
+    return (str:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", ""))
+end
+
 local function NormalizeKey(str)
     if not str then return nil end
     str = tostring(str)
+
+    -- 1. Extract rarity color code and item ID if an item link was passed
+    local colorHex = str:match("(|c%x%x%x%x%x%x%x%x)")
+    local linkItemID = str:match("item:(%d+)")
+
+    -- 2. Extract item name inside brackets if present, otherwise strip any color codes
     local bracketName = str:match("%[(.-)%]")
     if bracketName and bracketName ~= "" then
         str = bracketName
+    else
+        str = StripColorCodes(str)
     end
+
     str = str:gsub("^%s+", ""):gsub("%s+$", "")
     if str == "" then return nil end
-    return str:lower(), str
+
+    local key = str:lower()
+    local displayName = str
+
+    -- 3. If no color hex was present, attempt to resolve item quality via GetItemInfo
+    local lookupID = tonumber(linkItemID) or tonumber(str)
+    if lookupID and GetItemInfo then
+        local ok, itemName, _, itemQuality = pcall(GetItemInfo, lookupID)
+        if ok then
+            if not colorHex and itemQuality and QUALITY_INFO[itemQuality] then
+                colorHex = QUALITY_INFO[itemQuality].hex
+            end
+            if tonumber(str) and itemName and itemName ~= "" then
+                displayName = itemName .. " (" .. str .. ")"
+            elseif itemName and itemName ~= "" then
+                displayName = itemName
+            end
+        end
+    elseif not colorHex and GetItemInfo then
+        local ok, itemName, _, itemQuality = pcall(GetItemInfo, str)
+        if ok and itemName and itemName ~= "" then
+            displayName = itemName
+            if itemQuality and QUALITY_INFO[itemQuality] then
+                colorHex = QUALITY_INFO[itemQuality].hex
+            end
+        end
+    end
+
+    local display = colorHex and (colorHex .. displayName .. "|r") or displayName
+    return key, display
 end
 
 -- ============================================================================
@@ -154,15 +196,28 @@ local function ExtractItemID(link)
     return id and tostring(id) or nil
 end
 
-local function IsItemInList(listTable, itemName, itemID)
+local function IsItemInList(listTable, itemName, itemID, quality)
+    local qInfo = quality and QUALITY_INFO[tonumber(quality)]
     if itemName then
         local lowerName = itemName:lower()
-        if listTable[lowerName] then
+        local existing = listTable[lowerName]
+        if existing then
+            -- Auto-upgrade plain text entries with their rarity color once seen on a corpse
+            if qInfo and type(existing) == "string" and not existing:find("^|c") then
+                listTable[lowerName] = qInfo.hex .. itemName .. "|r"
+            end
             return true
         end
     end
-    if itemID and listTable[tostring(itemID)] then
-        return true
+    if itemID then
+        local idKey = tostring(itemID)
+        local existing = listTable[idKey]
+        if existing then
+            if qInfo and itemName and type(existing) == "string" and not existing:find("^|c") then
+                listTable[idKey] = qInfo.hex .. itemName .. " (" .. idKey .. ")|r"
+            end
+            return true
+        end
     end
     return false
 end
@@ -264,12 +319,12 @@ local function EvaluateSlotAction(slot)
     local itemID = ExtractItemID(link)
 
     -- 1. Ignore List always takes priority: leave in loot window for manual assignment
-    if IsItemInList(LootWizDB.ignoreList, itemName, itemID) then
+    if IsItemInList(LootWizDB.ignoreList, itemName, itemID, quality) then
         return "KEEP_MANUAL"
     end
 
     -- 2. Always Auto-Loot List overrides threshold and BoP settings
-    if IsItemInList(LootWizDB.alwaysLootList, itemName, itemID) then
+    if IsItemInList(LootWizDB.alwaysLootList, itemName, itemID, quality) then
         return "AUTO_LOOT_ITEM"
     end
 
@@ -620,10 +675,15 @@ local function CreateListPanel(parent, titleText, subtitleText, dbTableKey, xOff
         wipe(sortedKeys)
         local dbList = LootWizDB[dbTableKey]
         for k, displayVal in pairs(dbList) do
-            table.insert(sortedKeys, { key = k, display = type(displayVal) == "string" and displayVal or k })
+            local disp = type(displayVal) == "string" and displayVal or k
+            table.insert(sortedKeys, {
+                key = k,
+                display = disp,
+                sortName = StripColorCodes(disp):lower()
+            })
         end
         table.sort(sortedKeys, function(a, b)
-            return a.display:lower() < b.display:lower()
+            return a.sortName < b.sortName
         end)
 
         local maxOffset = math.max(0, #sortedKeys - MAX_ROWS)
