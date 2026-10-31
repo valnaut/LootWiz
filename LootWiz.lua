@@ -20,8 +20,9 @@ local QUALITY_INFO = {
     [2] = { name = "Uncommon",  hex = "|cff1eff00", r = 0.12, g = 1.00, b = 0.00 },
     [3] = { name = "Rare",      hex = "|cff0070dd", r = 0.00, g = 0.44, b = 0.87 },
     [4] = { name = "Epic",      hex = "|cffa335ee", r = 0.64, g = 0.21, b = 0.93 },
-    [5] = { name = "Legendary", hex = "|cffff8000", r = 1.00, g = 0.50, b = 0.00 },
+    [5] = { name = "Legendary", hex = "|cffff8000", r = 0.00, g = 0.50, b = 0.00 },
 }
+QUALITY_INFO[5].r = 1.00
 
 local function Print(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cffffd100[LootWiz]|r " .. tostring(msg))
@@ -366,105 +367,127 @@ local function ProcessCurrentLootWindow()
 end
 
 -- ============================================================================
--- Party Formation & Core Event Handler
--- ============================================================================
-local eventFrame = CreateFrame("Frame", "LootWizEventFrame")
-local wasInGroup = false
-
-local function CheckGroupTransition()
-    local currentlyInGroup = IsInGroup()
-
-    if not currentlyInGroup then
-        wasInGroup = false
-        return
-    end
-
-    if not wasInGroup then
-        wasInGroup = true
-        C_Timer.After(0.5, function()
-            if IsInGroup() and IsGroupLeader() then
-                local method = GetLootMethod()
-                if method ~= "master" then
-                    SetLootMethod("master", UnitName("player"))
-                    Print("Party formed — automatically setting loot method to |cffffd100Master Looter|r.")
-                end
-                C_Timer.After(1.2, function()
-                    EnsureServerThresholdCap()
-                end)
-            end
-        end)
-    else
-        C_Timer.After(0.5, function()
-            EnsureServerThresholdCap()
-        end)
-    end
-end
-
-eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
-eventFrame:RegisterEvent("PARTY_MEMBERS_CHANGED")
-eventFrame:RegisterEvent("RAID_ROSTER_UPDATE")
-eventFrame:RegisterEvent("PARTY_LOOT_METHOD_CHANGED")
-eventFrame:RegisterEvent("OPEN_MASTER_LOOT_LIST")
-eventFrame:RegisterEvent("LOOT_OPENED")
-eventFrame:RegisterEvent("LOOT_CLOSED")
-eventFrame:RegisterEvent("LOOT_SLOT_CLEARED")
-eventFrame:RegisterEvent("LOOT_BIND_CONFIRM")
-
-eventFrame:SetScript("OnEvent", function(self, event, arg1)
-    if event == "PLAYER_ENTERING_WORLD" then
-        wasInGroup = IsInGroup()
-        C_Timer.After(1.0, EnsureServerThresholdCap)
-
-    elseif event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" then
-        CheckGroupTransition()
-
-    elseif event == "PARTY_LOOT_METHOD_CHANGED" then
-        C_Timer.After(1.0, EnsureServerThresholdCap)
-        if ns.UpdateGUIStatus then
-            ns.UpdateGUIStatus()
-        end
-
-    elseif event == "OPEN_MASTER_LOOT_LIST" then
-        masterLootPromptFired = true
-        if isSuppressingMLPrompt then
-            HideMasterLootMenus()
-        end
-
-    elseif event == "LOOT_OPENED" then
-        isLootingSession = true
-        if IsPlayerMasterLooter() then
-            C_Timer.After(0.05, ProcessCurrentLootWindow)
-        end
-
-    elseif event == "LOOT_BIND_CONFIRM" then
-        local slot = tonumber(arg1)
-        if isLootingSession and slot and autoConfirmSlots[slot] then
-            ConfirmLootSlot(slot)
-            StaticPopup_Hide("LOOT_BIND")
-        end
-
-    elseif event == "LOOT_SLOT_CLEARED" then
-        if isLootingSession and IsPlayerMasterLooter() then
-            if not HasAnyLootRemaining() then
-                C_Timer.After(0.05, function()
-                    if isLootingSession and not HasAnyLootRemaining() then
-                        CloseLoot()
-                    end
-                end)
-            end
-        end
-
-    elseif event == "LOOT_CLOSED" then
-        isLootingSession = false
-        StopLootTicker()
-    end
-end)
-
--- ============================================================================
 -- Configuration GUI (/lootwiz or /lw) - Stock Neutral Grey & Gold Styling
 -- ============================================================================
 local guiFrame = nil
 local activeEditBox = nil
+
+local function TryInsertIntoActiveEditBox(text)
+    if activeEditBox and activeEditBox:IsVisible() and activeEditBox.AddItemToList and text then
+        local targetBox = activeEditBox
+        if targetBox.AddItemToList(text) then
+            if StackSplitFrame and StackSplitFrame:IsShown() then
+                StackSplitFrame:Hide()
+            end
+            -- Re-assert focus on the next frame so mouse-up from bag/loot slots never steals the cursor
+            C_Timer.After(0.01, function()
+                if targetBox:IsVisible() then
+                    activeEditBox = targetBox
+                    targetBox.hasFocus = true
+                    targetBox:SetFocus()
+                    targetBox:SetBackdropBorderColor(1.0, 0.82, 0.0, 1)
+                end
+            end)
+            return true
+        end
+    end
+    return false
+end
+
+local itemLinkHooksInstalled = false
+local function InstallItemLinkHooks()
+    if itemLinkHooksInstalled then return end
+    itemLinkHooksInstalled = true
+
+    local origChatEdit_InsertLink = ChatEdit_InsertLink
+    function ChatEdit_InsertLink(text)
+        if TryInsertIntoActiveEditBox(text) then
+            return true
+        end
+        if origChatEdit_InsertLink then
+            return origChatEdit_InsertLink(text)
+        end
+    end
+
+    if ContainerFrameItemButton_OnClick then
+        local origContainerClick = ContainerFrameItemButton_OnClick
+        function ContainerFrameItemButton_OnClick(button, ignoreShift)
+            local btn = button or arg1
+            if btn == "LeftButton" and IsShiftKeyDown() and not ignoreShift and activeEditBox and activeEditBox:IsVisible() then
+                local frame = this or (GetMouseFocus and GetMouseFocus())
+                if frame and frame:GetParent() and frame:GetID() then
+                    local link = GetContainerItemLink(frame:GetParent():GetID(), frame:GetID())
+                    if TryInsertIntoActiveEditBox(link) then
+                        return
+                    end
+                end
+            end
+            return origContainerClick(button, ignoreShift)
+        end
+    end
+
+    -- Safety net: if any custom bag addon calls OpenStackSplitFrame directly on Shift-click,
+    -- intercept the owner button's item link, add it to the active list, and block the split popup.
+    if OpenStackSplitFrame then
+        local origOpenStackSplitFrame = OpenStackSplitFrame
+        function OpenStackSplitFrame(maxStack, owner, anchor, anchorTo)
+            if activeEditBox and activeEditBox:IsVisible() and owner and owner:GetParent() and owner:GetID() then
+                local link = GetContainerItemLink(owner:GetParent():GetID(), owner:GetID())
+                if TryInsertIntoActiveEditBox(link) then
+                    return
+                end
+            end
+            return origOpenStackSplitFrame(maxStack, owner, anchor, anchorTo)
+        end
+    end
+
+    if PaperDollItemSlotButton_OnClick then
+        local origPaperDollClick = PaperDollItemSlotButton_OnClick
+        function PaperDollItemSlotButton_OnClick(button, ignoreShift)
+            local btn = button or arg1
+            if btn == "LeftButton" and IsShiftKeyDown() and not ignoreShift and activeEditBox and activeEditBox:IsVisible() then
+                local frame = this or (GetMouseFocus and GetMouseFocus())
+                if frame and frame:GetID() then
+                    local link = GetInventoryItemLink("player", frame:GetID())
+                    if TryInsertIntoActiveEditBox(link) then
+                        return
+                    end
+                end
+            end
+            return origPaperDollClick(button, ignoreShift)
+        end
+    end
+
+    if LootFrameItem_OnClick then
+        local origLootClick = LootFrameItem_OnClick
+        function LootFrameItem_OnClick(button)
+            local btn = button or arg1
+            if btn == "LeftButton" and IsShiftKeyDown() and activeEditBox and activeEditBox:IsVisible() then
+                local frame = this or (GetMouseFocus and GetMouseFocus())
+                local slot = frame and (frame.slot or frame:GetID())
+                if slot then
+                    local link = GetLootSlotLink(slot)
+                    if TryInsertIntoActiveEditBox(link) then
+                        return
+                    end
+                end
+            end
+            return origLootClick(button)
+        end
+    end
+
+    if SetItemRef then
+        local origSetItemRef = SetItemRef
+        function SetItemRef(link, text, button)
+            if IsShiftKeyDown() and activeEditBox and activeEditBox:IsVisible() then
+                if TryInsertIntoActiveEditBox(text or link) then
+                    return
+                end
+            end
+            return origSetItemRef(link, text, button)
+        end
+    end
+end
 
 local function CreateStyledButton(parent, width, height, text)
     local btn = CreateFrame("Button", nil, parent)
@@ -538,18 +561,45 @@ local function CreateListPanel(parent, titleText, subtitleText, dbTableKey, xOff
     editBox:SetBackdropColor(0.0, 0.0, 0.0, 0.95)
     editBox:SetBackdropBorderColor(0.40, 0.40, 0.40, 1)
 
-    editBox:SetScript("OnEditFocusGained", function(self)
-        activeEditBox = self
-        self:SetBackdropBorderColor(1.0, 0.82, 0.0, 1)
+    editBox:SetScript("OnMouseDown", function()
+        if activeEditBox and activeEditBox ~= editBox then
+            activeEditBox.hasFocus = false
+            activeEditBox:SetBackdropBorderColor(0.40, 0.40, 0.40, 1)
+        end
+        activeEditBox = editBox
+        editBox.hasFocus = true
+        editBox:SetFocus()
+        editBox:SetBackdropBorderColor(1.0, 0.82, 0.0, 1)
     end)
-    editBox:SetScript("OnEditFocusLost", function(self)
-        if activeEditBox == self then
+    editBox:SetScript("OnEditFocusGained", function()
+        if activeEditBox and activeEditBox ~= editBox then
+            activeEditBox.hasFocus = false
+            activeEditBox:SetBackdropBorderColor(0.40, 0.40, 0.40, 1)
+        end
+        activeEditBox = editBox
+        editBox.hasFocus = true
+        editBox:SetBackdropBorderColor(1.0, 0.82, 0.0, 1)
+    end)
+    editBox:SetScript("OnEditFocusLost", function()
+        editBox.hasFocus = false
+        -- Brief 0.25s grace window so mouse-down focus loss doesn't clear activeEditBox
+        -- before a bag/loot button's mouse-up OnClick handler runs.
+        C_Timer.After(0.25, function()
+            if not editBox.hasFocus then
+                if activeEditBox == editBox then
+                    activeEditBox = nil
+                end
+                editBox:SetBackdropBorderColor(0.40, 0.40, 0.40, 1)
+            end
+        end)
+    end)
+    editBox:SetScript("OnEscapePressed", function()
+        editBox.hasFocus = false
+        if activeEditBox == editBox then
             activeEditBox = nil
         end
-        self:SetBackdropBorderColor(0.40, 0.40, 0.40, 1)
-    end)
-    editBox:SetScript("OnEscapePressed", function(self)
-        self:ClearFocus()
+        editBox:SetBackdropBorderColor(0.40, 0.40, 0.40, 1)
+        editBox:ClearFocus()
     end)
 
     local addBtn = CreateStyledButton(panel, 50, 24, "Add")
@@ -633,13 +683,25 @@ local function CreateListPanel(parent, titleText, subtitleText, dbTableKey, xOff
         RefreshList()
     end)
 
-    local function AddCurrentInput()
-        local key, display = NormalizeKey(editBox:GetText())
+    local function AddItemToList(rawText)
+        local key, display = NormalizeKey(rawText)
         if key then
             LootWizDB[dbTableKey][key] = display
             editBox:SetText("")
             RefreshList()
+            activeEditBox = editBox
+            editBox.hasFocus = true
+            editBox:SetFocus()
+            editBox:SetBackdropBorderColor(1.0, 0.82, 0.0, 1)
+            return true
         end
+        return false
+    end
+
+    editBox.AddItemToList = AddItemToList
+
+    local function AddCurrentInput()
+        AddItemToList(editBox:GetText())
     end
 
     addBtn:SetScript("OnClick", AddCurrentInput)
@@ -780,11 +842,16 @@ local function BuildGUI()
     footer:SetText("Tip: Right-clicking your Player Frame -> Loot Threshold also updates LootWiz.")
 
     f:SetScript("OnShow", function()
+        InstallItemLinkHooks()
         ns.UpdateGUIThresholdButtons()
         ns.UpdateGUIBoPCheckbox()
         ns.UpdateGUIStatus()
         f.alwaysPanel.RefreshList()
         f.ignorePanel.RefreshList()
+    end)
+
+    f:SetScript("OnHide", function()
+        activeEditBox = nil
     end)
 
     ns.UpdateGUIThresholdButtons()
@@ -796,20 +863,101 @@ local function BuildGUI()
     return f
 end
 
--- Allow Shift-clicking items from bags/chat/loot into an active LootWiz input box
-local origChatEdit_InsertLink = ChatEdit_InsertLink
-function ChatEdit_InsertLink(text)
-    if activeEditBox and activeEditBox:IsVisible() and text then
-        local _, display = NormalizeKey(text)
-        if display then
-            activeEditBox:SetText(display)
-            return true
-        end
+-- ============================================================================
+-- Party Formation & Core Event Handler
+-- ============================================================================
+local eventFrame = CreateFrame("Frame", "LootWizEventFrame")
+local wasInGroup = false
+
+local function CheckGroupTransition()
+    local currentlyInGroup = IsInGroup()
+
+    if not currentlyInGroup then
+        wasInGroup = false
+        return
     end
-    if origChatEdit_InsertLink then
-        return origChatEdit_InsertLink(text)
+
+    if not wasInGroup then
+        wasInGroup = true
+        C_Timer.After(0.5, function()
+            if IsInGroup() and IsGroupLeader() then
+                local method = GetLootMethod()
+                if method ~= "master" then
+                    SetLootMethod("master", UnitName("player"))
+                    Print("Party formed — automatically setting loot method to |cffffd100Master Looter|r.")
+                end
+                C_Timer.After(1.2, function()
+                    EnsureServerThresholdCap()
+                end)
+            end
+        end)
+    else
+        C_Timer.After(0.5, function()
+            EnsureServerThresholdCap()
+        end)
     end
 end
+
+eventFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
+eventFrame:RegisterEvent("PARTY_MEMBERS_CHANGED")
+eventFrame:RegisterEvent("RAID_ROSTER_UPDATE")
+eventFrame:RegisterEvent("PARTY_LOOT_METHOD_CHANGED")
+eventFrame:RegisterEvent("OPEN_MASTER_LOOT_LIST")
+eventFrame:RegisterEvent("LOOT_OPENED")
+eventFrame:RegisterEvent("LOOT_CLOSED")
+eventFrame:RegisterEvent("LOOT_SLOT_CLEARED")
+eventFrame:RegisterEvent("LOOT_BIND_CONFIRM")
+
+eventFrame:SetScript("OnEvent", function(self, event, arg1)
+    if event == "PLAYER_ENTERING_WORLD" then
+        wasInGroup = IsInGroup()
+        InstallItemLinkHooks()
+        C_Timer.After(1.0, EnsureServerThresholdCap)
+
+    elseif event == "PARTY_MEMBERS_CHANGED" or event == "RAID_ROSTER_UPDATE" then
+        CheckGroupTransition()
+
+    elseif event == "PARTY_LOOT_METHOD_CHANGED" then
+        C_Timer.After(1.0, EnsureServerThresholdCap)
+        if ns.UpdateGUIStatus then
+            ns.UpdateGUIStatus()
+        end
+
+    elseif event == "OPEN_MASTER_LOOT_LIST" then
+        masterLootPromptFired = true
+        if isSuppressingMLPrompt then
+            HideMasterLootMenus()
+        end
+
+    elseif event == "LOOT_OPENED" then
+        isLootingSession = true
+        if IsPlayerMasterLooter() then
+            C_Timer.After(0.05, ProcessCurrentLootWindow)
+        end
+
+    elseif event == "LOOT_BIND_CONFIRM" then
+        local slot = tonumber(arg1)
+        if isLootingSession and slot and autoConfirmSlots[slot] then
+            ConfirmLootSlot(slot)
+            StaticPopup_Hide("LOOT_BIND")
+        end
+
+    elseif event == "LOOT_SLOT_CLEARED" then
+        if isLootingSession and IsPlayerMasterLooter() then
+            if not HasAnyLootRemaining() then
+                C_Timer.After(0.05, function()
+                    if isLootingSession and not HasAnyLootRemaining() then
+                        CloseLoot()
+                    end
+                end)
+            end
+        end
+
+    elseif event == "LOOT_CLOSED" then
+        isLootingSession = false
+        StopLootTicker()
+    end
+end)
 
 -- ============================================================================
 -- Slash Commands
