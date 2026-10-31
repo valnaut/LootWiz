@@ -1,7 +1,7 @@
 ## Interface: 11200
 ## Title: LootWiz
 ## Author: valnaut
-## Version: 0.2.2
+## Version: 0.2.3
 ## Notes: Reliable threshold-based Master Looter automation.
 ## SavedVariables: LootWizDB
 ## LoadSavedVariablesFirst: 1
